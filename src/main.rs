@@ -1,11 +1,12 @@
-use chrono::{DateTime, Local};
+use chrono::Local;
 use clap::{App, Arg};
 use fern;
 use log;
-use neovim_lib;
+use neovim_lib::neovim_api::Buffer;
 use neovim_lib::{Neovim, NeovimApi, Session};
 use std::collections::HashMap;
 use std::convert::TryFrom;
+use std::convert::TryInto;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::net::TcpStream;
 use std::thread;
@@ -13,79 +14,32 @@ mod error;
 use error::MyError;
 
 mod bencode;
+use bencode as bc;
 
 type Result<T> = std::result::Result<T, MyError>;
 
-struct NreplReceiver<R: BufRead> {
-    reader: R,
-}
-
-struct NreplSender<W: Write> {
-    session: String,
-    writer: W,
-}
-
-impl<R: BufRead> NreplReceiver<R> {
-    fn new(reader: R) -> Self {
-        NreplReceiver { reader }
-    }
-
-    fn recv(&mut self) -> Result<bencode::Value> {
-        log::debug!("Waiting for nREPL message");
-
-        match bencode::parse_bencode(&mut self.reader) {
-            Ok(Some(val)) => Ok(val),
-            Ok(None) => {
-                log::error!("None value from bencode");
-                Err(MyError::from("Invalid bencode from nREPL"))
-            }
-            Err(e) => {
-                log::error!("parse_bencode failed: {}", e.to_string());
-                Err(e)
-            }
-        }
-    }
-}
-
-impl<W: Write> NreplSender<W> {
-    fn new(writer: W) -> Self {
-        NreplSender {
-            session: "<no session>".to_string(),
-            writer,
-        }
-    }
-
-    fn reset_session(&mut self, s: &str) {
-        self.session = s.to_string();
-    }
-
-    fn send(&mut self, val: &bencode::Value) -> Result<()> {
-        log::debug!("Sending request to nREPL: {}", val.to_string(true));
-
-        self.writer.write_all(val.to_bencode().as_bytes())?;
-        self.writer.flush()?;
-
-        Ok(())
-    }
-}
+const DATEFMT: &'static str = "%H:%M:%S %b %d %Y";
 
 fn connect_nvim_socket() -> Result<Neovim> {
     log::debug!("Connecting NVIM socket");
 
     let socket_path = std::env::var("NVIM_LISTEN_ADDRESS")?;
-    let session = Session::new_unix_socket(socket_path)?;
+    let mut session = Session::new_unix_socket(socket_path)?;
+    session.start_event_loop();
 
     Ok(Neovim::new(session))
 }
 
-struct LogBuf {
+struct LogBuf<'a> {
+    buf: Buffer,
     cursor_line: i64,
     bufno: i64,
     winid: i64,
     max_lines: i64,
+    prefix: HashMap<&'a str, &'a str>,
 }
 
-impl LogBuf {
+impl LogBuf<'_> {
     fn new(nvim: &mut Neovim, max_lines: i64, path: &str) -> Result<Self> {
         log::debug!("Creating LogBuf: max_lines={}, path={}", max_lines, path);
 
@@ -94,36 +48,41 @@ impl LogBuf {
             .into_iter()
             .find(|b| path == b.get_name(nvim).unwrap_or_default())
         {
-            Some(buf) => {
-                let dt: DateTime<Local> = Local::now();
-                let lines = vec![format!(
-                    ";; Session {} ",
-                    dt.format("%Y-%m-%d %H:%M:%S").to_string()
-                )];
-                let lines_cnt = lines.len() as i64;
-                buf.set_lines(nvim, 0, lines_cnt, true, lines)?;
-                Ok(LogBuf {
-                    cursor_line: lines_cnt,
-                    bufno: buf.get_number(nvim)?,
-                    winid: nvim
-                        .get_var("logbuf_winid")?
-                        .as_i64()
-                        .ok_or("Unable to get g:logbuf_winid variable from NVIM")?,
-                    max_lines,
-                })
-            }
+            Some(buf) => Ok(LogBuf {
+                cursor_line: 0,
+                bufno: buf.get_number(nvim)?,
+                buf: buf,
+                winid: nvim
+                    .get_var("logbuf_winid")?
+                    .as_i64()
+                    .ok_or("Unable to get 'g:logbuf_winid' variable from NVIM")?,
+                max_lines,
+                prefix: [
+                    ("err", ";✖ "),
+                    ("nrepl.middleware.caught/throwable", ";  "),
+                    ("out", ";"),
+                    ("value", ""),
+                ]
+                .iter()
+                .cloned()
+                .collect(),
+            }),
             None => Err(MyError::from("Logbuf not opened in NVIM")),
         }
     }
 
-    fn get_prefix(&self, s: &str) -> &str {
-        match s {
-            "err" => ";✖ ",
-            "nrepl.middleware.caught/throwable" => ";  ",
-            "out" => ";",
-            "value" => "",
-            _ => ";",
-        }
+    fn wellcome(&mut self, nvim: &mut Neovim) -> Result<()> {
+        let lines = vec![format!(";; Start {} ", Local::now().format(DATEFMT))];
+        let lines_len = lines.len() as i64;
+        self.buf.set_lines(nvim, 0, -lines_len, true, lines)?;
+        self.cursor_line = lines_len;
+        Ok(())
+    }
+
+    fn goodbye(&mut self, nvim: &mut Neovim) -> Result<()> {
+        let lines = vec![format!(";; End   {} ", Local::now().format(DATEFMT))];
+        self.append_lines(nvim, lines)?;
+        Ok(())
     }
 
     fn trimmer(&mut self, trim_cnt: i64) -> Vec<neovim_lib::Value> {
@@ -141,7 +100,7 @@ impl LogBuf {
         trim
     }
 
-    fn get_appender(&mut self, lines: Vec<String>) -> Vec<neovim_lib::Value> {
+    fn appender(&mut self, lines: Vec<String>) -> Vec<neovim_lib::Value> {
         let mut append: Vec<neovim_lib::Value> = vec!["nvim_buf_set_lines".into()];
         let mut args: Vec<neovim_lib::Value> =
             vec![self.bufno.into(), (-1).into(), (-1).into(), true.into()];
@@ -152,126 +111,107 @@ impl LogBuf {
         append
     }
 
+    fn cursor_setter(&mut self) -> Vec<neovim_lib::Value> {
+        let mut cursor: Vec<neovim_lib::Value> = vec!["nvim_win_set_cursor".into()];
+        let mut args: Vec<neovim_lib::Value> = vec![self.winid.into()];
+        let tuple: Vec<neovim_lib::Value> = vec![self.cursor_line.into(), 0i64.into()];
+        args.push(tuple.into());
+        cursor.push(args.into());
+
+        cursor
+    }
+
     fn append_lines(&mut self, nvim: &mut Neovim, lines: Vec<String>) -> Result<()> {
-        log::debug!("Appending {} lines to NVIM log buffer", lines.len());
+        let lines_cnt = lines.len() as i64;
+        log::debug!("Appending to NVIM log buffer: {} lines", lines_cnt);
 
         let mut atom: Vec<neovim_lib::Value> = vec![];
-        let lines_cnt = lines.len() as i64;
 
         if !lines.is_empty() {
             if self.cursor_line + lines_cnt > self.max_lines {
                 let trim_cnt = self.max_lines / 2;
+
                 atom.push(self.trimmer(trim_cnt).into());
+
                 self.cursor_line = self.max_lines - trim_cnt + lines_cnt;
             } else {
                 self.cursor_line += lines_cnt;
             }
 
-            atom.push(self.get_appender(lines).into());
-
-            let mut cursor: Vec<neovim_lib::Value> = vec!["nvim_win_set_cursor".into()];
-            let mut args: Vec<neovim_lib::Value> = vec![self.winid.into()];
-            let tuple: Vec<neovim_lib::Value> = vec![self.cursor_line.into(), 0i64.into()];
-            args.push(tuple.into());
-
-            cursor.push(args.into());
-
-            atom.push(neovim_lib::Value::from(cursor));
-
+            atom.push(self.appender(lines).into());
+            atom.push(self.cursor_setter().into());
             nvim.call_atomic(atom)?;
-        }
-
-        Ok(())
-    }
-
-    fn extract_lines(&self, val: &bencode::Value) -> Result<(Vec<String>, String)> {
-        let mut lines: Vec<String> = vec![];
-        let mut value = String::from("");
-
-        if let bencode::Value::Map(hm) = val {
-            for key in &["err", "nrepl.middleware.caught/throwable", "out", "value"] {
-                if let Some(bencode::Value::Str(val)) = hm.get(&bencode::Value::from(*key)) {
-                    val.lines()
-                        .for_each(|l| lines.push(format!("{}{}", self.get_prefix(&key), l)));
-
-                    if key.eq(&"value") {
-                        value = val.to_string();
-                    }
-                }
-            }
-        } else {
-            return Err(MyError::from("Unexpected bencode value"));
-        }
-
-        Ok((lines, value))
-    }
-
-    fn echo_eval_result(
-        &self,
-        nvim: &mut Neovim,
-        val: &bencode::Value,
-        eval_result: &str,
-    ) -> Result<()> {
-        if let bencode::Value::Map(hm) = val {
-            if let Some(bencode::Value::List(list)) = hm.get(&bencode::Value::from("status")) {
-                if !eval_result.is_empty() && list.contains(&bencode::Value::from("done")) {
-                    log::debug!(
-                        "Echoing eval result: '{}'..",
-                        &eval_result[0..(std::cmp::min(70, eval_result.len()))]
-                    );
-
-                    nvim.out_write(&format!("{}\n", &eval_result))?;
-                }
-            } else if let Some(bencode::Value::Str(err)) = hm.get(&bencode::Value::from("err")) {
-                log::debug!("Echoing eval error: '{}'..", &err);
-
-                nvim.out_write(&format!("ERROR: {}\n", &err.replace('\n', " ")))?;
-            }
         }
 
         Ok(())
     }
 }
 
-fn is_exit(val: &bencode::Value) -> bool {
-    if let bencode::Value::Map(hm) = val {
-        if let Some(bencode::Value::List(list)) = hm.get(&bencode::Value::from("status")) {
-            return list.contains(&bencode::Value::from("session-closed"));
+fn is_exit(val: &bc::Value) -> bool {
+    if let bc::Value::Map(hm) = val {
+        if let Some(bc::Value::List(list)) = hm.get(&bc::Value::from("status")) {
+            return list.contains(&bc::Value::from("session-closed"));
         }
     }
 
     false
 }
 
-fn nrepl_loop<R: BufRead>(recver: &mut NreplReceiver<R>, logbuf: &mut LogBuf) -> Result<()> {
+fn nrepl_loop<R: BufRead>(reader: &mut R, logbuf: &mut LogBuf) -> Result<()> {
     log::debug!("Nrep_loop starting NVIM event loop");
-
     let mut nvim = connect_nvim_socket()?;
-    nvim.session.start_event_loop();
+
+    logbuf.wellcome(&mut nvim)?;
 
     let mut last_result = String::from("");
 
     loop {
-        match recver.recv() {
-            Ok(val) => {
-                log::debug!("Got nREPL message: {}", val.to_string(true));
+        match bc::parse_bencode(reader) {
+            Ok(Some(val)) => {
+                log::debug!("Got nREPL message: {}", &val);
 
                 if !is_exit(&val) {
-                    let (lines, result) = logbuf.extract_lines(&val)?;
-                    logbuf.append_lines(&mut nvim, lines)?;
-                    logbuf.echo_eval_result(&mut nvim, &val, &last_result)?;
-                    last_result = result;
+                    let nrepl_map: HashMap<String, String> = val.try_into()?;
+
+                    if let Some(key) = nrepl_map
+                        .keys()
+                        .find(|k| logbuf.prefix.get(k.as_str()).is_some())
+                    {
+                        let val: Vec<String> = nrepl_map
+                            .get(key)
+                            .unwrap()
+                            .lines()
+                            .map(|s| format!("{}{}", logbuf.prefix.get(key.as_str()).unwrap(), s))
+                            .collect();
+                        logbuf.append_lines(&mut nvim, val)?;
+                    }
+
+                    if let Some(s) = nrepl_map.get("status") {
+                        if s.contains("done") && !last_result.is_empty() {
+                            nvim.out_write(&format!("{}\n", &last_result))?;
+                        }
+                    } else if let Some(s) = nrepl_map.get("err") {
+                        nvim.out_write(&format!("ERROR: {}\n", &s.replace('\n', " ")))?;
+                        last_result = "".into();
+                    } else if let Some(s) = nrepl_map.get("value") {
+                        last_result = s.to_string();
+                    }
                 } else {
-                    log::debug!("Got exit from nREPL : {}", val.to_string(true));
                     break;
                 }
             }
+            Ok(None) => {
+                log::error!("Got None/empty response from nREPL");
+                return Err(MyError::from("Got None/empty response from nREPL"));
+            }
             Err(e) => {
-                log::error!("Failed to get message from nREPL: {}", e.to_string());
-                return Err(e);
+                log::error!("Failed to get message from nREPL: {}", e);
+                return Err(e.into());
             }
         }
     }
+
+    logbuf.goodbye(&mut nvim)?;
 
     Ok(())
 }
@@ -299,23 +239,23 @@ fn setup_logger() -> Result<()> {
     Ok(())
 }
 
-fn start_nrepl_session<W: Write, R: BufRead>(
-    sender: &mut NreplSender<W>,
-    recver: &mut NreplReceiver<R>,
+fn start_nrepl_session(
+    writer: &mut BufWriter<TcpStream>,
+    reader: &mut BufReader<TcpStream>,
 ) -> Result<String> {
     log::debug!("Starting new nREPL session");
 
     let mut m = HashMap::new();
     m.insert("op", "clone");
+    let val = bc::Value::from(m);
+    write_and_flush(writer, val.to_bencode().as_bytes())?;
 
-    sender.send(&bencode::Value::from(m))?;
-
-    match recver.recv() {
-        Ok(bencode::Value::Map(hm)) => {
-            match hm.get(&bencode::Value::Str("new-session".to_string())) {
-                Some(bencode::Value::Str(s)) => {
-                    sender.reset_session(s);
-                    log::debug!("New nREPL session OK");
+    match bc::parse_bencode(reader) {
+        Ok(Some(bc::Value::Map(hm))) => {
+            match hm.get(&bc::Value::Str("new-session".to_string())) {
+                Some(bc::Value::Str(s)) => {
+                    // sender.reset_session(s);
+                    log::debug!("New nREPL session: {}", s);
                     Ok(s.to_string())
                 }
                 Some(x) => Err(MyError::Error(format!(
@@ -339,19 +279,14 @@ fn start_nrepl_session<W: Write, R: BufRead>(
 fn connect_nrepl<'a, 'b>(
     host: &'a str,
     port: &'b str,
-) -> Result<(
-    NreplSender<BufWriter<TcpStream>>,
-    NreplReceiver<BufReader<TcpStream>>,
-)> {
+) -> Result<(BufWriter<TcpStream>, BufReader<TcpStream>)> {
     log::debug!("Opening TcpStream to nREPL");
 
     let stream = TcpStream::connect(format!("{}:{}", host, port))?;
     let stream2 = stream.try_clone()?;
     let writer = BufWriter::new(stream2);
     let reader = BufReader::new(stream);
-    let sender = NreplSender::new(writer);
-    let recver = NreplReceiver::new(reader);
-    Ok((sender, recver))
+    Ok((writer, reader))
 }
 
 fn get_args() -> Result<(String, String, i64)> {
@@ -403,12 +338,10 @@ fn get_args() -> Result<(String, String, i64)> {
     Ok((port, logpath, logsize.parse::<i64>()?))
 }
 
-impl TryFrom<Vec<neovim_lib::Value>> for bencode::Value {
+impl TryFrom<Vec<neovim_lib::Value>> for bc::Value {
     type Error = &'static str;
 
-    fn try_from(
-        nvim_arg: Vec<neovim_lib::Value>,
-    ) -> std::result::Result<bencode::Value, Self::Error> {
+    fn try_from(nvim_arg: Vec<neovim_lib::Value>) -> std::result::Result<bc::Value, Self::Error> {
         log::debug!("Parsing NVIM message");
 
         if let Some(vals) = nvim_arg.iter().next().unwrap().as_map() {
@@ -416,41 +349,30 @@ impl TryFrom<Vec<neovim_lib::Value>> for bencode::Value {
             for (k, v) in vals {
                 if v.is_str() {
                     hm.insert(
-                        bencode::Value::from(k.as_str().unwrap_or("")),
-                        bencode::Value::from(v.as_str().unwrap_or("")),
+                        bc::Value::from(k.as_str().unwrap_or("")),
+                        bc::Value::from(v.as_str().unwrap_or("")),
                     );
                 } else if v.is_i64() {
                     hm.insert(
-                        bencode::Value::from(k.as_str().unwrap_or("")),
-                        bencode::Value::Int(v.as_i64().unwrap_or(0) as i32),
+                        bc::Value::from(k.as_str().unwrap_or("")),
+                        bc::Value::Int(v.as_i64().unwrap_or(0) as i32),
                     );
                 } else {
                     log::warn!("Unsupported value type: {}", v.to_string());
-                    return Err("Failed to convert NVIM message to bencode::Value");
+                    return Err("Failed to convert NVIM message to bc::Value");
                 }
             }
-            return Ok(bencode::Value::from(hm));
+            return Ok(bc::Value::from(hm));
         }
 
-        Err("Unable to convert NVIM message to bencode::Value")
+        Err("Unable to convert NVIM message to bc::Value")
     }
 }
 
-fn insert_nrepl_session(val: &mut bencode::Value, session: &str) -> Result<()> {
-    log::debug!("Inserting nREPL session key '{}' to request", session);
-
-    match val {
-        bencode::Value::Map(hm) => {
-            hm.insert(
-                bencode::Value::from("session"),
-                bencode::Value::from(session),
-            );
-            Ok(())
-        }
-        _ => Err(MyError::from(
-            "Invalid bencode, cannot insert session key to nREPL request",
-        )),
-    }
+fn write_and_flush(writer: &mut BufWriter<TcpStream>, buf: &[u8]) -> Result<()> {
+    writer.write_all(buf)?;
+    writer.flush()?;
+    Ok(())
 }
 
 fn run() -> Result<()> {
@@ -458,31 +380,32 @@ fn run() -> Result<()> {
     log::debug!("---------Starting---------");
 
     let (port, logfile, logsize) = get_args()?;
-    let (mut sender, mut recver) = connect_nrepl("127.0.0.1", &port)?;
-    let nrepl_session = start_nrepl_session(&mut sender, &mut recver)?;
+    let (mut writer, mut reader) = connect_nrepl("127.0.0.1", &port)?;
+    let session_id = start_nrepl_session(&mut writer, &mut reader)?;
 
     let nvim_session = Session::new_parent()?;
     let mut nvim = Neovim::new(nvim_session);
-    let nvim_recver = nvim.session.start_event_loop_channel();
+    let nvim_channel = nvim.session.start_event_loop_channel();
+    nvim.set_var(
+        "redbush_nrepl_session_id",
+        neovim_lib::Value::from(session_id.as_str()),
+    )?;
 
     let mut logbuf = LogBuf::new(&mut nvim, logsize, &logfile)?;
+    let nrepl = thread::spawn(move || nrepl_loop(&mut reader, &mut logbuf));
 
-    let nrepl = thread::spawn(move || nrepl_loop(&mut recver, &mut logbuf));
-
-    for (event, nvim_args) in nvim_recver {
+    for (event, nvim_args) in nvim_channel {
         log::debug!("Got NVIM message: event={}", event);
         match event.as_str() {
             "nrepl" => {
-                let mut bc_value = bencode::Value::try_from(nvim_args)?;
-                log::debug!("Parsed NVIM message: {}", bc_value.to_string(true));
-
-                insert_nrepl_session(&mut bc_value, &nrepl_session)?;
-                sender.send(&bc_value)?;
+                let bc = bc::Value::try_from(nvim_args)?;
+                log::debug!("nREPL message from NVIM: {}", &bc);
+                write_and_flush(&mut writer, bc.to_bencode().as_bytes())?;
             }
             "stop" | "exit" | _ => {
                 let mut hm = HashMap::new();
                 hm.insert("op", "close");
-                sender.send(&bencode::Value::from(hm))?;
+                write_and_flush(&mut writer, &bc::Value::from(hm).to_bencode().as_bytes())?;
                 break;
             }
         }
