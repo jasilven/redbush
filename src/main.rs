@@ -1,8 +1,6 @@
-use chrono::Local;
 use clap::{App, Arg};
 use fern;
 use log;
-use neovim_lib::neovim_api::Buffer;
 use neovim_lib::{Neovim, NeovimApi, Session};
 use std::collections::HashMap;
 use std::convert::TryFrom;
@@ -15,10 +13,10 @@ use error::MyError;
 
 mod bencode;
 use bencode as bc;
+mod logbuf;
+use logbuf::LogBuf;
 
 type Result<T> = std::result::Result<T, MyError>;
-
-const DATEFMT: &'static str = "%H:%M:%S %b %d %Y";
 
 fn connect_nvim_socket() -> Result<Neovim> {
     log::debug!("Connecting NVIM socket");
@@ -28,123 +26,6 @@ fn connect_nvim_socket() -> Result<Neovim> {
     session.start_event_loop();
 
     Ok(Neovim::new(session))
-}
-
-struct LogBuf<'a> {
-    buf: Buffer,
-    cursor_line: i64,
-    bufno: i64,
-    winid: i64,
-    max_lines: i64,
-    prefix: HashMap<&'a str, &'a str>,
-}
-
-impl LogBuf<'_> {
-    fn new(nvim: &mut Neovim, max_lines: i64, path: &str) -> Result<Self> {
-        log::debug!("Creating LogBuf: max_lines={}, path={}", max_lines, path);
-
-        let buffers = nvim.list_bufs()?;
-        match buffers
-            .into_iter()
-            .find(|b| path == b.get_name(nvim).unwrap_or_default())
-        {
-            Some(buf) => Ok(LogBuf {
-                cursor_line: 0,
-                bufno: buf.get_number(nvim)?,
-                buf: buf,
-                winid: nvim
-                    .get_var("logbuf_winid")?
-                    .as_i64()
-                    .ok_or("Unable to get 'g:logbuf_winid' variable from NVIM")?,
-                max_lines,
-                prefix: [
-                    ("err", ";✖ "),
-                    ("nrepl.middleware.caught/throwable", ";  "),
-                    ("out", ";"),
-                    ("value", ""),
-                ]
-                .iter()
-                .cloned()
-                .collect(),
-            }),
-            None => Err(MyError::from("Logbuf not opened in NVIM")),
-        }
-    }
-
-    fn wellcome(&mut self, nvim: &mut Neovim) -> Result<()> {
-        let lines = vec![format!(";; Start {} ", Local::now().format(DATEFMT))];
-        let lines_len = lines.len() as i64;
-        self.buf.set_lines(nvim, 0, -lines_len, true, lines)?;
-        self.cursor_line = lines_len;
-        Ok(())
-    }
-
-    fn goodbye(&mut self, nvim: &mut Neovim) -> Result<()> {
-        let lines = vec![format!(";; End   {} ", Local::now().format(DATEFMT))];
-        self.append_lines(nvim, lines)?;
-        Ok(())
-    }
-
-    fn trimmer(&mut self, trim_cnt: i64) -> Vec<neovim_lib::Value> {
-        let mut trim: Vec<neovim_lib::Value> = vec!["nvim_buf_set_lines".into()];
-        let args: Vec<neovim_lib::Value> = vec![
-            self.bufno.into(),
-            0.into(),
-            trim_cnt.into(),
-            true.into(),
-            neovim_lib::Value::Array(vec![]),
-        ];
-
-        trim.push(args.into());
-
-        trim
-    }
-
-    fn appender(&mut self, lines: Vec<String>) -> Vec<neovim_lib::Value> {
-        let mut append: Vec<neovim_lib::Value> = vec!["nvim_buf_set_lines".into()];
-        let mut args: Vec<neovim_lib::Value> =
-            vec![self.bufno.into(), (-1).into(), (-1).into(), true.into()];
-        let lns: Vec<neovim_lib::Value> = lines.into_iter().map(|l| l.into()).collect();
-        args.push(lns.into());
-        append.push(args.into());
-
-        append
-    }
-
-    fn cursor_setter(&mut self) -> Vec<neovim_lib::Value> {
-        let mut cursor: Vec<neovim_lib::Value> = vec!["nvim_win_set_cursor".into()];
-        let mut args: Vec<neovim_lib::Value> = vec![self.winid.into()];
-        let tuple: Vec<neovim_lib::Value> = vec![self.cursor_line.into(), 0i64.into()];
-        args.push(tuple.into());
-        cursor.push(args.into());
-
-        cursor
-    }
-
-    fn append_lines(&mut self, nvim: &mut Neovim, lines: Vec<String>) -> Result<()> {
-        let lines_cnt = lines.len() as i64;
-        log::debug!("Appending to NVIM log buffer: {} lines", lines_cnt);
-
-        let mut atom: Vec<neovim_lib::Value> = vec![];
-
-        if !lines.is_empty() {
-            if self.cursor_line + lines_cnt > self.max_lines {
-                let trim_cnt = self.max_lines / 2;
-
-                atom.push(self.trimmer(trim_cnt).into());
-
-                self.cursor_line = self.max_lines - trim_cnt + lines_cnt;
-            } else {
-                self.cursor_line += lines_cnt;
-            }
-
-            atom.push(self.appender(lines).into());
-            atom.push(self.cursor_setter().into());
-            nvim.call_atomic(atom)?;
-        }
-
-        Ok(())
-    }
 }
 
 fn is_exit(val: &bc::Value) -> bool {
@@ -239,11 +120,11 @@ fn setup_logger() -> Result<()> {
     Ok(())
 }
 
-fn start_nrepl_session(
+fn get_nrepl_session_id(
     writer: &mut BufWriter<TcpStream>,
     reader: &mut BufReader<TcpStream>,
 ) -> Result<String> {
-    log::debug!("Starting new nREPL session");
+    log::debug!("Starting nREPL session");
 
     let mut m = HashMap::new();
     m.insert("op", "clone");
@@ -251,20 +132,17 @@ fn start_nrepl_session(
     write_and_flush(writer, val.to_bencode().as_bytes())?;
 
     match bc::parse_bencode(reader) {
-        Ok(Some(bc::Value::Map(hm))) => {
-            match hm.get(&bc::Value::Str("new-session".to_string())) {
-                Some(bc::Value::Str(s)) => {
-                    // sender.reset_session(s);
-                    log::debug!("New nREPL session: {}", s);
-                    Ok(s.to_string())
-                }
-                Some(x) => Err(MyError::Error(format!(
-                    "Unexpected nREPL response for 'clone' request: {:?}",
-                    x
-                ))),
-                None => Err(MyError::from("No nREPL response for 'clone' request")),
+        Ok(Some(bc::Value::Map(hm))) => match hm.get(&bc::Value::Str("new-session".to_string())) {
+            Some(bc::Value::Str(s)) => {
+                log::debug!("nREPL session id: {}", s);
+                Ok(s.to_string())
             }
-        }
+            Some(x) => Err(MyError::Error(format!(
+                "Unexpected nREPL response for 'clone' request: {:?}",
+                x
+            ))),
+            None => Err(MyError::from("No nREPL response for 'clone' request")),
+        },
         Ok(x) => Err(MyError::Error(format!(
             "Unexpected nREPL response for 'clone' request: {:?}",
             x
@@ -280,7 +158,7 @@ fn connect_nrepl<'a, 'b>(
     host: &'a str,
     port: &'b str,
 ) -> Result<(BufWriter<TcpStream>, BufReader<TcpStream>)> {
-    log::debug!("Opening TcpStream to nREPL");
+    log::debug!("Connecting nREPL port {}", port);
 
     let stream = TcpStream::connect(format!("{}:{}", host, port))?;
     let stream2 = stream.try_clone()?;
@@ -304,38 +182,38 @@ fn get_args() -> Result<(String, String, i64)> {
                 .required(false),
         )
         .arg(
-            Arg::with_name("log")
-                .short("l")
-                .long("log")
-                .value_name("LOG")
-                .help("nREPL eval-logfile path e.g. /tmp/redbush-log.clj")
+            Arg::with_name("filepath")
+                .short("f")
+                .long("file")
+                .value_name("FILE")
+                .help("file path e.g. /tmp/redbush-eval.clj")
                 .required(true),
         )
         .arg(
-            Arg::with_name("logsize")
+            Arg::with_name("filesize")
                 .short("s")
-                .long("logsize")
+                .long("size")
                 .value_name("LOG")
-                .help("eval-logfile size in lines")
+                .help("file size in lines")
                 .required(false),
         )
         .get_matches();
     let port = match matches.value_of("port") {
-        Some(p) => p.to_string(),
+        Some(x) => x.to_string(),
         None => match std::fs::read_to_string(".nrepl-port") {
-            Ok(p) => p,
+            Ok(x) => x,
             Err(e) => return Err(MyError::from(e)),
         },
     };
 
-    let logpath = match matches.value_of("log") {
-        Some(p) => p.to_string(),
-        None => return Err(MyError::from("eval-logfile name not given")),
+    let filepath = match matches.value_of("filepath") {
+        Some(x) => x.to_string(),
+        None => return Err(MyError::from("file name not given")),
     };
 
-    let logsize = matches.value_of("logsize").unwrap_or("100");
+    let filesize = matches.value_of("filesize").unwrap_or("1000");
 
-    Ok((port, logpath, logsize.parse::<i64>()?))
+    Ok((port, filepath, filesize.parse::<i64>()?))
 }
 
 impl TryFrom<Vec<neovim_lib::Value>> for bc::Value {
@@ -379,19 +257,21 @@ fn run() -> Result<()> {
     setup_logger()?;
     log::debug!("---------Starting---------");
 
-    let (port, logfile, logsize) = get_args()?;
+    let (port, filepath, filesize) = get_args()?;
     let (mut writer, mut reader) = connect_nrepl("127.0.0.1", &port)?;
-    let session_id = start_nrepl_session(&mut writer, &mut reader)?;
+    let session_id = get_nrepl_session_id(&mut writer, &mut reader)?;
 
     let nvim_session = Session::new_parent()?;
     let mut nvim = Neovim::new(nvim_session);
     let nvim_channel = nvim.session.start_event_loop_channel();
+
+    log::debug!("Setting redbush_nrepl_session_id");
     nvim.set_var(
         "redbush_nrepl_session_id",
         neovim_lib::Value::from(session_id.as_str()),
     )?;
 
-    let mut logbuf = LogBuf::new(&mut nvim, logsize, &logfile)?;
+    let mut logbuf = LogBuf::new(&mut nvim, filesize, &filepath)?;
     let nrepl = thread::spawn(move || nrepl_loop(&mut reader, &mut logbuf));
 
     for (event, nvim_args) in nvim_channel {
@@ -421,7 +301,7 @@ fn main() {
     match run() {
         Ok(_) => log::debug!("Good exit"),
         Err(e) => {
-            log::error!("ERROR: {}", e);
+            log::error!("{}", e);
             std::process::exit(1);
         }
     }

@@ -8,6 +8,8 @@ use std::iter::Iterator;
 use std::str::FromStr;
 use std::string::ToString;
 
+type Result<T> = std::result::Result<T, BencodeError>;
+
 #[derive(Debug)]
 pub enum BencodeError {
     Error(String),
@@ -18,11 +20,9 @@ pub enum BencodeError {
 impl Display for BencodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            BencodeError::Error(s) => {
-                write!(f, "Error: {} (file: {}, line: {})", s, file!(), line!())
-            }
-            BencodeError::Io(e) => write!(f, "{} ({}, {})", e, file!(), line!()),
-            BencodeError::Parse(e) => write!(f, "{} ({}, {})", e, file!(), line!()),
+            BencodeError::Error(s) => write!(f, "Bencode Error: {} ", s),
+            BencodeError::Io(e) => write!(f, "Bencode Io: {}", e),
+            BencodeError::Parse(e) => write!(f, "Bencode Parse: {}", e),
         }
     }
 }
@@ -38,8 +38,6 @@ impl From<std::num::ParseIntError> for BencodeError {
         BencodeError::Parse(err)
     }
 }
-
-type Result<T> = std::result::Result<T, BencodeError>;
 
 #[derive(Clone, Debug, Eq)]
 pub struct HMap(pub HashMap<Value, Value>);
@@ -101,10 +99,6 @@ impl HMap {
     pub fn get(&self, key: &Value) -> Option<&Value> {
         self.0.get(key)
     }
-
-    pub fn insert(&mut self, key: Value, val: Value) -> Option<Value> {
-        self.0.insert(key, val)
-    }
 }
 
 impl Hash for HMap {
@@ -155,40 +149,6 @@ impl Display for Value {
 }
 
 impl Value {
-    // pub fn to_string(&self, keywordize_key: bool) -> String {
-    //     match self {
-    //         Value::Map(hm) => {
-    //             let mut result = String::from("{");
-    //             for (key, val) in hm.0.iter() {
-    //                 if let true = keywordize_key {
-    //                     result.push(':');
-    //                 };
-    //                 result.push_str(&key.to_string(keywordize_key));
-    //                 result.push(' ');
-    //                 result.push_str(&val.to_string(keywordize_key));
-    //                 result.push(' ');
-    //             }
-    //             let mut result = result.trim_end().to_string();
-    //             result.push('}');
-    //             result
-    //         }
-    //         Value::List(v) => {
-    //             let mut result = String::from("[");
-    //             for item in v {
-    //                 result.push_str(&item.to_string(keywordize_key));
-    //                 result.push_str(", ");
-    //             }
-    //             let mut result = result
-    //                 .trim_end_matches(|c| c == ',' || c == ' ')
-    //                 .to_string();
-    //             result.push(']');
-    //             result
-    //         }
-    //         Value::Str(s) => s.clone(),
-    //         Value::Int(i) => i.to_string(),
-    //     }
-    // }
-
     pub fn to_bencode(&self) -> String {
         match self {
             Value::Map(hm) => {
@@ -226,7 +186,7 @@ pub fn parse_bencode(reader: &mut dyn BufRead) -> Result<Option<Value>> {
                     let n = i32::from_str(&s)?;
                     Ok(Some(Value::Int(n)))
                 }
-                Err(e) => Err(BencodeError::Io(e)),
+                Err(e) => return Err(e.into()),
             },
             b'd' => {
                 let mut map = HashMap::new();
