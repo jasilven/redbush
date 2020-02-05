@@ -3,18 +3,17 @@ use fern;
 use log;
 use neovim_lib::{Neovim, NeovimApi, Session};
 use std::collections::HashMap;
-use std::convert::TryFrom;
-use std::convert::TryInto;
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::thread;
 mod error;
 use error::MyError;
 
-mod bencode;
-use bencode as bc;
 mod logbuf;
-use logbuf::LogBuf;
+mod nrepl;
+mod prepl;
+mod repl;
+use repl::{ReplReceiver, ReplSender};
 
 type Result<T> = std::result::Result<T, MyError>;
 
@@ -26,75 +25,6 @@ fn connect_nvim_socket() -> Result<Neovim> {
     session.start_event_loop();
 
     Ok(Neovim::new(session))
-}
-
-fn is_exit(val: &bc::Value) -> bool {
-    if let bc::Value::Map(hm) = val {
-        if let Some(bc::Value::List(list)) = hm.get(&bc::Value::from("status")) {
-            return list.contains(&bc::Value::from("session-closed"));
-        }
-    }
-
-    false
-}
-
-fn nrepl_loop<R: BufRead>(reader: &mut R, logbuf: &mut LogBuf) -> Result<()> {
-    log::debug!("Nrep_loop starting NVIM event loop");
-    let mut nvim = connect_nvim_socket()?;
-
-    logbuf.wellcome(&mut nvim)?;
-
-    let mut last_result = String::from("");
-
-    loop {
-        match bc::parse_bencode(reader) {
-            Ok(Some(val)) => {
-                log::debug!("Got nREPL message: {}", &val);
-
-                if !is_exit(&val) {
-                    let nrepl_map: HashMap<String, String> = val.try_into()?;
-
-                    if let Some(key) = nrepl_map
-                        .keys()
-                        .find(|k| logbuf.prefix.get(k.as_str()).is_some())
-                    {
-                        let val: Vec<String> = nrepl_map
-                            .get(key)
-                            .unwrap()
-                            .lines()
-                            .map(|s| format!("{}{}", logbuf.prefix.get(key.as_str()).unwrap(), s))
-                            .collect();
-                        logbuf.append_lines(&mut nvim, val)?;
-                    }
-
-                    if let Some(s) = nrepl_map.get("status") {
-                        if s.contains("done") && !last_result.is_empty() {
-                            nvim.out_write(&format!("{}\n", &last_result))?;
-                        }
-                    } else if let Some(s) = nrepl_map.get("err") {
-                        nvim.out_write(&format!("ERROR: {}\n", &s.replace('\n', " ")))?;
-                        last_result = "".into();
-                    } else if let Some(s) = nrepl_map.get("value") {
-                        last_result = s.to_string();
-                    }
-                } else {
-                    break;
-                }
-            }
-            Ok(None) => {
-                log::error!("Got None/empty response from nREPL");
-                return Err(MyError::from("Got None/empty response from nREPL"));
-            }
-            Err(e) => {
-                log::error!("Failed to get message from nREPL: {}", e);
-                return Err(e.into());
-            }
-        }
-    }
-
-    logbuf.goodbye(&mut nvim)?;
-
-    Ok(())
 }
 
 fn setup_logger() -> Result<()> {
@@ -110,8 +40,7 @@ fn setup_logger() -> Result<()> {
         })
         .level(log::LevelFilter::Debug)
         .level_for("neovim_lib", log::LevelFilter::Error)
-        .level_for("redbush::bencode", log::LevelFilter::Error)
-        .chain(std::io::stderr())
+        .level_for("redbush::repl::bencode", log::LevelFilter::Error)
         .chain(fern::DateBased::new("/tmp/redbush.log.", "%Y-%m-%d"))
         .apply()?;
 
@@ -120,65 +49,18 @@ fn setup_logger() -> Result<()> {
     Ok(())
 }
 
-fn get_nrepl_session_id(
-    writer: &mut BufWriter<TcpStream>,
-    reader: &mut BufReader<TcpStream>,
-) -> Result<String> {
-    log::debug!("Starting nREPL session");
-
-    let mut m = HashMap::new();
-    m.insert("op", "clone");
-    let val = bc::Value::from(m);
-    write_and_flush(writer, val.to_bencode().as_bytes())?;
-
-    match bc::parse_bencode(reader) {
-        Ok(Some(bc::Value::Map(hm))) => match hm.get(&bc::Value::Str("new-session".to_string())) {
-            Some(bc::Value::Str(s)) => {
-                log::debug!("nREPL session id: {}", s);
-                Ok(s.to_string())
-            }
-            Some(x) => Err(MyError::Error(format!(
-                "Unexpected nREPL response for 'clone' request: {:?}",
-                x
-            ))),
-            None => Err(MyError::from("No nREPL response for 'clone' request")),
-        },
-        Ok(x) => Err(MyError::Error(format!(
-            "Unexpected nREPL response for 'clone' request: {:?}",
-            x
-        ))),
-        Err(e) => Err(MyError::Error(format!(
-            "Failed to get nREPL response: {}",
-            e
-        ))),
-    }
-}
-
-fn connect_nrepl<'a, 'b>(
-    host: &'a str,
-    port: &'b str,
-) -> Result<(BufWriter<TcpStream>, BufReader<TcpStream>)> {
-    log::debug!("Connecting nREPL port {}", port);
-
-    let stream = TcpStream::connect(format!("{}:{}", host, port))?;
-    let stream2 = stream.try_clone()?;
-    let writer = BufWriter::new(stream2);
-    let reader = BufReader::new(stream);
-    Ok((writer, reader))
-}
-
-fn get_args() -> Result<(String, String, i64)> {
+fn get_args() -> Result<(String, String, String, i64)> {
     log::debug!("Parsing command line arguments:");
 
-    let matches = App::new("Clojure nREPL plugin ")
+    let matches = App::new("Clojure xREPL plugin ")
         .author("jasilven <jasilven@gmail.com>")
-        .about("Clojure nREPL plugin for neovim")
+        .about("Clojure xREPL plugin for neovim")
         .arg(
             Arg::with_name("port")
                 .short("p")
                 .long("port")
                 .value_name("PORT")
-                .help("nREPL port")
+                .help("xREPL port")
                 .required(false),
         )
         .arg(
@@ -198,11 +80,21 @@ fn get_args() -> Result<(String, String, i64)> {
                 .required(false),
         )
         .get_matches();
+
     let port = match matches.value_of("port") {
-        Some(x) => x.to_string(),
+        Some(p) => p.to_string(),
         None => match std::fs::read_to_string(".nrepl-port") {
-            Ok(x) => x,
-            Err(e) => return Err(MyError::from(e)),
+            Ok(p) => p,
+            Err(_) => match std::fs::read_to_string(".prepl-port") {
+                Ok(p) => p,
+                Err(e) => {
+                    log::debug!("REPL port missing");
+                    return Err(MyError::from(format!(
+                    "No '-port'-parameter given and .nrepl-port/.prepl-port files not found: {}",
+                    e
+                )));
+                }
+            },
         },
     };
 
@@ -213,96 +105,217 @@ fn get_args() -> Result<(String, String, i64)> {
 
     let filesize = matches.value_of("filesize").unwrap_or("1000");
 
-    Ok((port, filepath, filesize.parse::<i64>()?))
+    Ok(("127.0.0.1".into(), port, filepath, filesize.parse::<i64>()?))
 }
 
-impl TryFrom<Vec<neovim_lib::Value>> for bc::Value {
-    type Error = &'static str;
+fn to_params(nvim_args: Vec<neovim_lib::Value>) -> Result<HashMap<repl::Param, repl::Param>> {
+    log::debug!("Parsing NVIM message");
 
-    fn try_from(nvim_arg: Vec<neovim_lib::Value>) -> std::result::Result<bc::Value, Self::Error> {
-        log::debug!("Parsing NVIM message");
+    if let Some(vals) = nvim_args.iter().next().unwrap().as_map() {
+        let mut hm = HashMap::new();
 
-        if let Some(vals) = nvim_arg.iter().next().unwrap().as_map() {
-            let mut hm = HashMap::new();
-            for (k, v) in vals {
-                if v.is_str() {
-                    hm.insert(
-                        bc::Value::from(k.as_str().unwrap_or("")),
-                        bc::Value::from(v.as_str().unwrap_or("")),
-                    );
-                } else if v.is_i64() {
-                    hm.insert(
-                        bc::Value::from(k.as_str().unwrap_or("")),
-                        bc::Value::Int(v.as_i64().unwrap_or(0) as i32),
-                    );
-                } else {
-                    log::warn!("Unsupported value type: {}", v.to_string());
-                    return Err("Failed to convert NVIM message to bc::Value");
-                }
+        for (k, v) in vals {
+            if v.is_str() {
+                hm.insert(
+                    repl::Param::Str(k.as_str().unwrap_or("").into()),
+                    repl::Param::Str(v.as_str().unwrap_or("").into()),
+                );
+            } else if v.is_i64() {
+                hm.insert(
+                    repl::Param::Str(k.as_str().unwrap_or("").into()),
+                    repl::Param::Int(v.as_i64().unwrap_or(0) as i32),
+                );
+            } else {
+                log::warn!("Unsupported NVIM value type: {}", v.to_string());
+                return Err("Failed to convert NVIM message to bc::Value".into());
             }
-            return Ok(bc::Value::from(hm));
         }
 
-        Err("Unable to convert NVIM message to bc::Value")
+        return Ok(hm);
     }
+
+    Err("Unable to convert NVIM message".into())
 }
 
-fn write_and_flush(writer: &mut BufWriter<TcpStream>, buf: &[u8]) -> Result<()> {
-    writer.write_all(buf)?;
-    writer.flush()?;
+fn repl_loop(mut receiver: impl ReplReceiver, logbuf: &mut logbuf::LogBuf) -> Result<()> {
+    log::debug!("repl_loop starting NVIM event loop");
+    let mut nvim = connect_nvim_socket()?;
+
+    let mut prefix = HashMap::<String, String>::new();
+    prefix.insert("err".into(), ";✖ ".into());
+    prefix.insert("exc".into(), ";  ".into());
+    prefix.insert("out".into(), ";".into());
+    prefix.insert("ns".into(), ";=> ".into());
+    prefix.insert("status".into(), ";; Status: ".into());
+    prefix.insert("value".into(), "".into());
+
+    logbuf.wellcome(&mut nvim)?;
+
+    loop {
+        match receiver.receive() {
+            Ok(repl::Response::Value(value, ns, ms, form)) => {
+                log::debug!(
+                    "Got VALUE response from REPL: value: {}, ns: {}, ms: {}, form: {}",
+                    value,
+                    ns,
+                    ms,
+                    form
+                );
+                logbuf.show(
+                    &mut nvim,
+                    prefix.get("value").unwrap_or(&"".to_string()),
+                    &value,
+                )?;
+                logbuf.show(&mut nvim, prefix.get("ns").unwrap_or(&"".to_string()), &ns)?;
+                nvim.out_write(&format!("{}\n", &value))?;
+            }
+            Ok(repl::Response::Err(s)) => {
+                log::debug!("Got ERR response from REPL: {}", s);
+                logbuf.show(&mut nvim, prefix.get("err").unwrap_or(&"".to_string()), &s)?;
+                nvim.out_write(&format!("ERROR: {}\n", &s))?;
+            }
+            Ok(repl::Response::Out(s)) => {
+                log::debug!("Got OUT response from REPL: {}", s);
+                logbuf.show(&mut nvim, prefix.get("out").unwrap_or(&"".to_string()), &s)?;
+            }
+            Ok(repl::Response::Exception(s)) => {
+                log::debug!("Got EXCEPTION response from REPL: {}", s);
+                logbuf.show(&mut nvim, prefix.get("exc").unwrap_or(&"".to_string()), &s)?;
+            }
+            Ok(repl::Response::Other(s)) => {
+                log::debug!("Got OTHER response from REPL: {}", s);
+            }
+            Ok(repl::Response::NewSession(s)) => {
+                log::debug!("Got NEWSESSION response from REPL: {}", s);
+            }
+            Ok(repl::Response::Status(v)) => {
+                log::debug!("Got STATUS response from REPL: {:?}", &v);
+
+                let mut status = "".to_string();
+                v.iter().for_each(|s| status.push_str(&format!("{} ", s)));
+
+                logbuf.show(
+                    &mut nvim,
+                    prefix.get("status").unwrap_or(&"".to_string()),
+                    &status,
+                )?;
+
+                if v.contains(&"session-closed".to_string()) {
+                    break;
+                }
+            }
+            Ok(repl::Response::Eof()) => {
+                log::debug!("Got EOF response from REPL");
+                nvim.command("RedBushStop")?;
+                logbuf.goodbye(&mut nvim, "REPL died?")?;
+                panic!("Got EOF from REPL");
+            }
+            Err(e) => {
+                log::debug!("Got Error from REPL: {}", &e);
+                nvim.command("RedBushStop")?;
+                logbuf.goodbye(&mut nvim, "REPL died?")?;
+                panic!(format!("Failed to get REPL message (REPL died?): {}", e));
+            }
+        }
+    }
+
+    logbuf.goodbye(&mut nvim, "End")?;
+
     Ok(())
 }
 
-fn run() -> Result<()> {
-    setup_logger()?;
-    log::debug!("---------Starting---------");
-
-    let (port, filepath, filesize) = get_args()?;
-    let (mut writer, mut reader) = connect_nrepl("127.0.0.1", &port)?;
-    let session_id = get_nrepl_session_id(&mut writer, &mut reader)?;
-
+fn run(
+    mut sender: impl ReplSender,
+    receiver: impl ReplReceiver,
+    filesize: i64,
+    filepath: &str,
+) -> Result<()> {
     let nvim_session = Session::new_parent()?;
     let mut nvim = Neovim::new(nvim_session);
     let nvim_channel = nvim.session.start_event_loop_channel();
 
-    log::debug!("Setting redbush_nrepl_session_id");
+    let mut logbuf = logbuf::LogBuf::new(&mut nvim, filesize, &filepath)?;
+    let nrepl_t = thread::spawn(move || repl_loop(receiver, &mut logbuf));
+
+    log::debug!("Setting NVIM 'g:redbush_repl_session_id'");
     nvim.set_var(
-        "redbush_nrepl_session_id",
-        neovim_lib::Value::from(session_id.as_str()),
+        "redbush_repl_session_id",
+        neovim_lib::Value::from(sender.session_id().as_str()),
     )?;
 
-    let mut logbuf = LogBuf::new(&mut nvim, filesize, &filepath)?;
-    let nrepl = thread::spawn(move || nrepl_loop(&mut reader, &mut logbuf));
-
     for (event, nvim_args) in nvim_channel {
-        log::debug!("Got NVIM message: event={}", event);
+        log::debug!("Got NVIM event: {}", event);
+
         match event.as_str() {
-            "nrepl" => {
-                let bc = bc::Value::try_from(nvim_args)?;
-                log::debug!("nREPL message from NVIM: {}", &bc);
-                write_and_flush(&mut writer, bc.to_bencode().as_bytes())?;
+            "eval" => {
+                let params = to_params(nvim_args)?;
+                log::debug!("EVAL-message from NVIM, params: {:?}", &params);
+                sender.send(repl::Request::Eval(params))?;
             }
+
+            "interrupt" => {
+                let params = to_params(nvim_args)?;
+                log::debug!("INTERRUPT-message from NVIM, params: {:?}", &params);
+                sender.send(repl::Request::Interrupt(params))?;
+            }
+
             "stop" | "exit" | _ => {
-                let mut hm = HashMap::new();
-                hm.insert("op", "close");
-                write_and_flush(&mut writer, &bc::Value::from(hm).to_bencode().as_bytes())?;
+                log::debug!("EXIT-message from NVIM");
+                sender.send(repl::Request::Exit())?;
                 break;
             }
         }
     }
 
     log::debug!("Waiting for nREPL thread");
-    nrepl.join().expect("Thread join error!")?;
 
-    Ok(())
+    match nrepl_t.join() {
+        Err(e) => Err(MyError::from(format!("Error from nREPL thread: {:?}", e))),
+        _ => Ok(()),
+    }
 }
 
-fn main() {
-    match run() {
-        Ok(_) => log::debug!("Good exit"),
-        Err(e) => {
-            log::error!("{}", e);
-            std::process::exit(1);
+fn main() -> Result<()> {
+    setup_logger().unwrap();
+    log::debug!("---------------- Starting ---------------- ");
+
+    let (host, port, filepath, filesize) = get_args()?;
+
+    log::debug!("Connecting REPL");
+    let mut stream = TcpStream::connect(format!("{}:{}", "127.0.0.1", port))?;
+
+    log::debug!("Handshaking with REPL");
+    let _ = stream.write(b"d4:code7:(+ 1 1)2:op4:evale\n")?;
+    stream.flush()?;
+
+    let mut buf = [0u8; 1];
+
+    match stream.read_exact(&mut buf) {
+        Ok(_) => {
+            if buf[0] == 123 {
+                log::debug!("pREPL is available");
+                let (sender, receiver) = prepl::new_sender_receiver(&host, &port)?;
+                run(sender, receiver, filesize, &filepath)
+            } else if buf[0] == 100 {
+                log::debug!("nREPL is available");
+                let (sender, receiver) = nrepl::new_sender_receiver(&host, &port)?;
+                run(sender, receiver, filesize, &filepath)
+            } else {
+                log::debug!(
+                    "Unexpected response from nREPL or pREPL at {}:{}",
+                    host,
+                    port
+                );
+                std::process::exit(1)
+            }
+        }
+        Err(_) => {
+            log::debug!(
+                "Neither nREPL or pREPL is not available at {}:{}",
+                host,
+                port
+            );
+            std::process::exit(1)
         }
     }
 }

@@ -14,6 +14,7 @@ type Result<T> = std::result::Result<T, BencodeError>;
 pub enum BencodeError {
     Error(String),
     Io(std::io::Error),
+    Eof(),
     Parse(std::num::ParseIntError),
 }
 
@@ -23,6 +24,7 @@ impl Display for BencodeError {
             BencodeError::Error(s) => write!(f, "Bencode Error: {} ", s),
             BencodeError::Io(e) => write!(f, "Bencode Io: {}", e),
             BencodeError::Parse(e) => write!(f, "Bencode Parse: {}", e),
+            BencodeError::Eof() => write!(f, "Bencode Eof"),
         }
     }
 }
@@ -186,7 +188,7 @@ pub fn parse_bencode(reader: &mut dyn BufRead) -> Result<Option<Value>> {
                     let n = i32::from_str(&s)?;
                     Ok(Some(Value::Int(n)))
                 }
-                Err(e) => return Err(e.into()),
+                Err(e) => Err(e.into()),
             },
             b'd' => {
                 let mut map = HashMap::new();
@@ -228,15 +230,15 @@ pub fn parse_bencode(reader: &mut dyn BufRead) -> Result<Option<Value>> {
                 Err(e) => Err(BencodeError::Io(e)),
             },
         },
-        Err(e) => Err(BencodeError::Error(format!(
-            "received None from reader: {}",
-            e
-        ))),
+        Err(e) => match e.kind() {
+            std::io::ErrorKind::UnexpectedEof => (Err(BencodeError::Eof())),
+            _ => Err(BencodeError::Io(e)),
+        },
     }
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
     use std::io::BufReader;
 

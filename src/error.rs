@@ -1,4 +1,4 @@
-use crate::bencode;
+use crate::repl;
 use std::fmt;
 
 #[derive(Debug)]
@@ -11,7 +11,7 @@ pub enum MyError {
     ParseInt(std::num::ParseIntError),
     ParseFloat(std::num::ParseFloatError),
     Nvim(neovim_lib::CallError),
-    Bencode(bencode::BencodeError),
+    Repl(repl::ReplError),
 }
 
 impl fmt::Display for MyError {
@@ -24,7 +24,7 @@ impl fmt::Display for MyError {
             MyError::ParseInt(ref err) => err.fmt(f),
             MyError::ParseFloat(ref err) => err.fmt(f),
             MyError::Nvim(ref err) => err.fmt(f),
-            MyError::Bencode(ref s) => write!(f, "{}", s),
+            MyError::Repl(ref s) => write!(f, "{}", s),
             MyError::Error(ref s) => write!(f, "{}", s),
         }
     }
@@ -36,15 +36,21 @@ impl From<&str> for MyError {
     }
 }
 
+impl From<String> for MyError {
+    fn from(s: String) -> MyError {
+        MyError::Error(s)
+    }
+}
+
 impl From<log::SetLoggerError> for MyError {
     fn from(err: log::SetLoggerError) -> MyError {
         MyError::Log(err)
     }
 }
 
-impl From<bencode::BencodeError> for MyError {
-    fn from(err: bencode::BencodeError) -> MyError {
-        MyError::Bencode(err)
+impl From<repl::ReplError> for MyError {
+    fn from(err: repl::ReplError) -> MyError {
+        MyError::Repl(err)
     }
 }
 

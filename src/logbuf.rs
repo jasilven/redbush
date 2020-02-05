@@ -3,19 +3,17 @@ use crate::Result;
 use chrono::Local;
 use neovim_lib::neovim_api::Buffer;
 use neovim_lib::{Neovim, NeovimApi};
-use std::collections::HashMap;
 
-const DATEFMT: &'static str = "%H:%M:%S %b %d %Y";
+const DATEFMT: &str = "%H:%M:%S %b %d %Y";
 
-pub struct LogBuf<'a> {
+pub struct LogBuf {
     buf: Buffer,
     bufno: i64,
     winid: i64,
     max_lines: i64,
-    pub prefix: HashMap<&'a str, &'a str>,
 }
 
-impl LogBuf<'_> {
+impl LogBuf {
     pub fn new(nvim: &mut Neovim, max_lines: i64, path: &str) -> Result<Self> {
         log::debug!("Creating LogBuf: max_lines={}, path={}", max_lines, path);
 
@@ -26,21 +24,12 @@ impl LogBuf<'_> {
         {
             Some(buf) => Ok(LogBuf {
                 bufno: buf.get_number(nvim)?,
-                buf: buf,
+                buf,
                 winid: nvim
                     .get_var("logbuf_winid")?
                     .as_i64()
                     .ok_or("Unable to get 'g:logbuf_winid' variable from NVIM")?,
                 max_lines,
-                prefix: [
-                    ("err", ";✖ "),
-                    ("nrepl.middleware.caught/throwable", ";  "),
-                    ("out", ";"),
-                    ("value", ""),
-                ]
-                .iter()
-                .cloned()
-                .collect(),
             }),
             None => Err(MyError::from("Logbuf not opened in NVIM")),
         }
@@ -48,14 +37,14 @@ impl LogBuf<'_> {
 
     pub fn wellcome(&mut self, nvim: &mut Neovim) -> Result<()> {
         log::debug!("Showing logbuf wellcome");
-        let lines = vec![format!(";; Start {} ", Local::now().format(DATEFMT))];
-        let lines_len = lines.len() as i64;
-        self.buf.set_lines(nvim, 0, -lines_len, true, lines)?;
+        let lines = vec![format!(";; [{}] Start", Local::now().format(DATEFMT))];
+        self.buf
+            .set_lines(nvim, 0, -(lines.len() as i64), true, lines)?;
         Ok(())
     }
 
-    pub fn goodbye(&mut self, nvim: &mut Neovim) -> Result<()> {
-        let lines = vec![format!(";; End   {} ", Local::now().format(DATEFMT))];
+    pub fn goodbye(&mut self, nvim: &mut Neovim, msg: &str) -> Result<()> {
+        let lines = vec![format!(";; [{}] {}", Local::now().format(DATEFMT), msg)];
         self.append_lines(nvim, lines)?;
         Ok(())
     }
@@ -117,6 +106,18 @@ impl LogBuf<'_> {
             atom.push(self.cursor_setter(cursor_line).into());
             nvim.call_atomic(atom)?;
         }
+
+        Ok(())
+    }
+
+    pub fn show(&mut self, nvim: &mut Neovim, prefix: &str, content: &str) -> Result<()> {
+        self.append_lines(
+            nvim,
+            content
+                .lines()
+                .map(|s| format!("{}{}", prefix, s))
+                .collect(),
+        )?;
 
         Ok(())
     }

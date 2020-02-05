@@ -26,18 +26,20 @@ if !exists('s:jobid')
     let s:jobid = 0
 endif
 
-fun! s:start()
-    if (s:jobid == 0)    || (s:jobid == -1)
+fun! s:start(...)
+    if (s:jobid == 0) || (s:jobid == -1)
         let l:command = [g:redbush_bin, '-f', g:redbush_filepath, '-s', g:redbush_filesize]
-        if filereadable('.nrepl-port') == 0
-            let port = input("Give nREPL port? ")
-            if port == ''
+        if a:0 == 1
+            let l:port = a:1
+        elseif (filereadable('.nrepl-port') == 0) && (filereadable('.prepl-port') == 0)
+            let l:port = input("Give xREPL port? ")
+            if l:port == ''
                 echo "No port given, quitting."
                 return
             endif 
-            let l:command = extend(l:command, ['-p', port ])
         endif
 
+        let l:command = extend(l:command, ['-p', l:port ])
         let s:jobid = jobstart(l:command, { 'rpc': v:true , 'on_exit': function('s:exit')})
 
         if s:jobid == 0
@@ -46,7 +48,8 @@ fun! s:start()
             let s:jobid = 0
             echoerr g:redbush_bin . " not executable"
         else 
-            exe 'silent! bd! ' g:redbush_filepath
+            exe 'silent! bd! ' . g:redbush_filepath
+            exe 'silent! !rm ' . g:redbush_filepath
             call s:logbuf_show(g:redbush_is_vertical, g:redbush_winsize)
         endif
     else
@@ -67,14 +70,14 @@ fun! s:restart()
 endf
 
 fun! s:exit(...)
-    if len(g:redbush_nrepl_session_id) == 0
+    if len(g:redbush_repl_session_id) == 0
         call s:logbuf_hide()
         echo "Failed to start Redbush"
     endif
     if s:jobid != 0
         let s:jobid = 0
     endif
-    let g:redbush_nrepl_session_id = ''
+    let g:redbush_repl_session_id = ''
 endf
 
 
@@ -123,19 +126,19 @@ endf
 """"""""""""""""""""""
 """" nrepl/eval stuff 
 """"""""""""""""""""""
-if !exists('g:redbush_nrepl_session_id')
-    let g:redbush_nrepl_session_id = ''
+if !exists('g:redbush_repl_session_id')
+    let g:redbush_repl_session_id = ''
 endif
 
 let s:nrepl_defaults = {
         \ "nrepl.middleware.caught/caugh": "clojure.repl/pst",
         \ "nrepl.middleware.caught/print?": 1,
-        \ "nrepl.middleware.print/print": "user/rbpprint",
+        \ "XXnrepl.middleware.print/print": "n/a",
         \ "XXnrepl.middleware.print/quota": "n/a" }
 
 fun! s:send_to_plugin(event, args)
     let args = extend(a:args, s:nrepl_defaults)
-    let args = extend(args, {"session": g:redbush_nrepl_session_id})
+    let args = extend(args, {"session": g:redbush_repl_session_id})
     call rpcnotify(s:jobid, a:event, args)
 endf
 
@@ -151,12 +154,11 @@ endf
 fun! s:eval_range() 
     let [line, column] = getpos("'<")[1:2]
     let args = {
-        \ "op": "eval", 
         \ "file": expand("%:p"),
         \ "line": line, 
         \ "column": column,
         \ "code": s:selected_text() }
-    call s:send_to_plugin('nrepl', args)
+    call s:send_to_plugin('eval', args)
 endf
 
 fun! s:eval_form() 
@@ -170,12 +172,11 @@ fun! s:eval_form_time()
     normal va(
     normal "_y 
     let args = {
-        \ "op": "eval", 
         \ "file": expand("%:p"),
         \ "line": line, 
         \ "column": column,
         \ "code": '(time ' . s:selected_text() . " \n)" }
-    call s:send_to_plugin('nrepl', args)
+    call s:send_to_plugin('eval', args)
 endf
 
 fun! s:eval_file() 
@@ -195,21 +196,19 @@ fun! s:eval_file()
     let end = getpos("$")[1] 
     let lines = getline(1, end)                 
     let args = {
-        \ "op": "eval", 
         \ "line": 0,
         \ "code": join(lines, "\n"),
         \ "file-path": l:path, 
         \ "file-name": expand("%:t") }
 
-    call s:send_to_plugin('nrepl', args)
+    call s:send_to_plugin('eval', args)
 endf
 
 fun! s:run_tests() 
     let args = {
-        \ "op": "eval", 
         \ "file": expand("%:p"),
         \ "code": '(clojure.test/run-tests)' }
-    call s:send_to_plugin('nrepl', args)
+    call s:send_to_plugin('eval', args)
 endf
 
 """"""""""""""""""""""
@@ -229,9 +228,8 @@ command! RedBushEvalFormTime call s:eval_form_time()
 """" testing
 """"""""""""""""""""""
 fun! s:interrupt() 
-    let args = {
-        \ "op": "interrupt" }
-    call s:send_to_plugin('nrepl', args)
+    call s:send_to_plugin('interrupt', {})
 endf
 
 command! RedBushInterrupt call s:interrupt()
+command! -nargs=1 RedBushConnect call s:start(<q-args>)
