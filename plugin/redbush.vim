@@ -30,16 +30,16 @@ fun! s:start(...)
     if (s:jobid == 0) || (s:jobid == -1)
         let l:command = [g:redbush_bin, '-f', g:redbush_filepath, '-s', g:redbush_filesize]
         if a:0 == 1
-            let l:port = a:1
+            let l:command = extend(l:command, ['-p', a:1 ])
         elseif (filereadable('.nrepl-port') == 0) && (filereadable('.prepl-port') == 0)
-            let l:port = input("Give xREPL port? ")
-            if l:port == ''
+            let port = input("Give xREPL port? ")
+            if port == ''
                 echo "No port given, quitting."
                 return
             endif 
+            let l:command = extend(l:command, ['-p', port ])
         endif
-
-        let l:command = extend(l:command, ['-p', l:port ])
+        
         let s:jobid = jobstart(l:command, { 'rpc': v:true , 'on_exit': function('s:exit')})
 
         if s:jobid == 0

@@ -56,6 +56,14 @@ fn get_args() -> Result<(String, String, String, i64)> {
         .author("jasilven <jasilven@gmail.com>")
         .about("Clojure xREPL plugin for neovim")
         .arg(
+            Arg::with_name("host")
+                .short("h")
+                .long("host")
+                .value_name("HOST")
+                .help("xREPL host")
+                .required(false),
+        )
+        .arg(
             Arg::with_name("port")
                 .short("p")
                 .long("port")
@@ -81,6 +89,8 @@ fn get_args() -> Result<(String, String, String, i64)> {
         )
         .get_matches();
 
+    let host = matches.value_of("host").unwrap_or("127.0.0.1");
+
     let port = match matches.value_of("port") {
         Some(p) => p.to_string(),
         None => match std::fs::read_to_string(".nrepl-port") {
@@ -105,7 +115,7 @@ fn get_args() -> Result<(String, String, String, i64)> {
 
     let filesize = matches.value_of("filesize").unwrap_or("1000");
 
-    Ok(("127.0.0.1".into(), port, filepath, filesize.parse::<i64>()?))
+    Ok((host.to_string(), port, filepath, filesize.parse::<i64>()?))
 }
 
 fn to_params(nvim_args: Vec<neovim_lib::Value>) -> Result<HashMap<repl::Param, repl::Param>> {
@@ -149,7 +159,7 @@ fn repl_loop(mut receiver: impl ReplReceiver, logbuf: &mut logbuf::LogBuf) -> Re
     prefix.insert("status".into(), ";; Status: ".into());
     prefix.insert("value".into(), "".into());
 
-    logbuf.wellcome(&mut nvim)?;
+    logbuf.message(&mut nvim, "Start")?;
 
     loop {
         match receiver.receive() {
@@ -207,19 +217,19 @@ fn repl_loop(mut receiver: impl ReplReceiver, logbuf: &mut logbuf::LogBuf) -> Re
             Ok(repl::Response::Eof()) => {
                 log::debug!("Got EOF response from REPL");
                 nvim.command("RedBushStop")?;
-                logbuf.goodbye(&mut nvim, "REPL died?")?;
+                logbuf.message(&mut nvim, "REPL died?")?;
                 panic!("Got EOF from REPL");
             }
             Err(e) => {
                 log::debug!("Got Error from REPL: {}", &e);
                 nvim.command("RedBushStop")?;
-                logbuf.goodbye(&mut nvim, "REPL died?")?;
+                logbuf.message(&mut nvim, "REPL died?")?;
                 panic!(format!("Failed to get REPL message (REPL died?): {}", e));
             }
         }
     }
 
-    logbuf.goodbye(&mut nvim, "End")?;
+    logbuf.message(&mut nvim, "End")?;
 
     Ok(())
 }
@@ -282,7 +292,7 @@ fn main() -> Result<()> {
     let (host, port, filepath, filesize) = get_args()?;
 
     log::debug!("Connecting REPL");
-    let mut stream = TcpStream::connect(format!("{}:{}", "127.0.0.1", port))?;
+    let mut stream = TcpStream::connect(format!("{}:{}", host, port))?;
 
     log::debug!("Handshaking with REPL");
     let _ = stream.write(b"d4:code7:(+ 1 1)2:op4:evale\n")?;

@@ -35,17 +35,16 @@ impl LogBuf {
         }
     }
 
-    pub fn wellcome(&mut self, nvim: &mut Neovim) -> Result<()> {
-        log::debug!("Showing logbuf wellcome");
-        let lines = vec![format!(";; [{}] Start", Local::now().format(DATEFMT))];
-        self.buf
-            .set_lines(nvim, 0, -(lines.len() as i64), true, lines)?;
-        Ok(())
-    }
-
-    pub fn goodbye(&mut self, nvim: &mut Neovim, msg: &str) -> Result<()> {
+    pub fn message(&self, nvim: &mut Neovim, msg: &str) -> Result<()> {
+        log::debug!("Showing logbuf welcome");
         let lines = vec![format!(";; [{}] {}", Local::now().format(DATEFMT), msg)];
-        self.append_lines(nvim, lines)?;
+        let start = if self.buf.line_count(nvim)? > 1 {
+            -1
+        } else {
+            0
+        };
+
+        self.buf.set_lines(nvim, start, -1, true, lines)?;
         Ok(())
     }
 
