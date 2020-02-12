@@ -17,7 +17,7 @@ Those features were the main goals for redbush from the beginning.
 While the basic functionality is considered done, it is still taking baby steps and it's definitely not yet battle-tested thoroughly. 
 
 
-### Install 
+## Install 
 Basic installation requires that you have rust and cargo installed in your system.
 Example installation using [vim-plug]: 
 
@@ -30,7 +30,7 @@ This fetches, compiles and installs the latest version of redbush binary executa
 Redbush binary executable is placed according to your cargo settings (typically in `$HOME/.cargo/bin`).
 
 
-### Configuration
+## Configuration
 
 Example configuration with default values (.vimrc/init.vim): 
 
@@ -50,9 +50,9 @@ let g:redbush_winsize = 40
 You only need to configure those if you are not happy with the defaults. 
 
 
-### Usage
+## Usage
 
-#### Start nrepl, prepl or both of them
+### Start nrepl, prepl or both of them
 First start your nrepl/prepl server however you wish. 
 Here is an example of leiningen project.clj that will start both repls:
 
@@ -75,10 +75,10 @@ $ lein repl
 Now you should have both nrepl and prepl available in different ports and the port numbers can be found inside the `.nrepl-port` and `.prepl-port` files accordingly.
 
 
-#### Redbush neovim-commands
+### Redbush neovim-commands
 There are several neovim commands available that you can use to interact with the plugin and the repl:
 
-##### Starting/Stopping redbush and connecting to the repl
+#### Starting/Stopping and connecting to the repl
 * `RedBushStart` starts redbush plugin which connects to the repl port if there 
 is either `.nrepl-port` or `.prepl-port` file containing the repl port number in the current working directory. 
 If both of the port-files are missing you should use `RedBushConnect <repl port-number>` to start redbush and connect it to the repl you wish. 
@@ -87,16 +87,16 @@ With `RedBushConnect` the `.nrepl-port` or '.prepl-port' files are ignored.
 * `RedBushRestart` restart redbush.
 * `RedBushStop` stop and exit redbush. 
 
-##### Evaluating 
+#### Evaluating 
 * `RedBushEvalRange` evaluate (visual) range.
 * `RedBushEvalForm` evaluate surrounding clojure-form.
 * `RedBushEvalFile` evaluate whole file.
 * `RedBushEvalFormTime` evaluate surrounding clojure-form with `clojure.core/time`.
 
-##### Show/Hide evaluation buffer 
+#### Show/Hide evaluation buffer 
 * `RedBushToggle` toggle evaluation buffer.
 
-##### Running tests 
+#### Running tests 
 * `RedBushRunTests` run current namespace tests (using `clojure.test/run-tests`).
 
 All of the above neovim-commands can be mapped as usual to keyboard shortcuts as you like.
