@@ -81,9 +81,9 @@ There are several neovim commands available that you can use to interact with th
 #### Starting/Stopping and connecting to the repl
 * `RedBushStart` starts redbush plugin which connects to the repl port if there 
 is either `.nrepl-port` or `.prepl-port` file containing the repl port number in the current working directory. 
-If both of the port-files are missing you should use `RedBushConnect <repl port-number>` to start redbush and connect it to the repl you wish. 
+If both of the port-files are missing you should use `RedBushConnect <port>` to start redbush and connect it to the repl you wish. 
 * `RedBushConnect <port>` starts and connects redbush to the repl in port `<port>`. 
-With `RedBushConnect` the `.nrepl-port` or '.prepl-port' files are ignored.
+With `RedBushConnect` the .nrepl-port or .prepl-port files are ignored.
 * `RedBushRestart` restart redbush.
 * `RedBushStop` stop and exit redbush. 
 
