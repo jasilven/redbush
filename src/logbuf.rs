@@ -35,13 +35,10 @@ impl LogBuf {
         let lines = vec![format!(";; [{}] {}", Local::now().format(DATEFMT), msg)];
         if self.buf.line_count(nvim)? > 1 {
             self.append_lines(nvim, lines)?;
-        // -1
         } else {
             self.buf.set_lines(nvim, 0, -1, true, lines)?;
-            // 0
         };
 
-        // self.buf.set_lines(nvim, start, -1, true, lines)?;
         Ok(())
     }
 
