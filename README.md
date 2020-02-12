@@ -14,7 +14,7 @@ As redbush is written in rust it has fast and almost instant startup time and it
 effortless/automatic support for both nrepl and prepl (clojure's standard socket repl). 
 Those features were the main goals for redbush from the beginning.
 
-While the basic functionality is considered done, it is still taking baby steps and it's definitely not yet battle-tested thoroughly. 
+While the basic functionality is considered done, redbush is still taking baby steps and it's definitely not yet battle-tested thoroughly. 
 
 
 ## Install 
