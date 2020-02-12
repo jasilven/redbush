@@ -91,6 +91,7 @@ fun! s:logbuf_show(is_vertical, size)
     else 
         exe 'belowright ' . a:size . 'split' . g:redbush_filepath
     endif
+    normal <C-End>
     exe 'set signcolumn=no'
     exe g:redbush_filesize
     let s:logbuf_bufinfo = getbufinfo(g:redbush_filepath)[0]
@@ -223,6 +224,7 @@ command! RedBushEvalFile call s:eval_file()
 command! RedBushToggle call s:logbuf_toggle()
 command! RedBushRunTests call s:run_tests()
 command! RedBushEvalFormTime call s:eval_form_time()
+command! -nargs=1 RedBushConnect call s:start(<q-args>)
 
 """"""""""""""""""""""
 """" testing
@@ -232,4 +234,3 @@ fun! s:interrupt()
 endf
 
 command! RedBushInterrupt call s:interrupt()
-command! -nargs=1 RedBushConnect call s:start(<q-args>)

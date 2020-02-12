@@ -1,5 +1,7 @@
-use crate::repl::Result;
-use crate::repl::*;
+use crate::repl::{
+    parse_exception, Param, ReplError, ReplReceiver, ReplSender, Request, Response, Result,
+};
+// use crate::repl::*;
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::io::{BufReader, BufWriter, Write};
@@ -64,7 +66,35 @@ pub fn new_sender_receiver(host: &str, port: &str) -> Result<(impl ReplSender, i
         Ok(Response::NewSession(session_id)) => {
             sender.session_id = session_id.to_string();
             receiver.session_id = session_id;
-            Ok((sender, receiver))
+
+            sender.send(Request::DisableNsMaps())?;
+            match receiver.receive() {
+                Ok(Response::Value(_, _, _, _)) => match receiver.receive() {
+                    Ok(Response::Status(vec)) => {
+                        if vec.contains(&"done".to_string()) {
+                            Ok((sender, receiver))
+                        } else {
+                            log::debug!("Unable to disable ns-maps");
+                            Err(ReplError::from("Unable to disable ns-maps"))
+                        }
+                    }
+                    Ok(_) => {
+                        log::debug!("Unexpected response when trying to disable ns-maps");
+                        Err(ReplError::Error(
+                            "Unexpected response when trying to disable ns-maps".to_string(),
+                        ))
+                    }
+                    Err(e) => {
+                        log::debug!("Failed to disable ns-maps");
+                        Err(ReplError::Error(e.to_string()))
+                    }
+                },
+
+                Err(_) | Ok(_) => {
+                    log::debug!("Failed to disable ns-maps");
+                    Err(ReplError::Error("Failed to disable ns-maps".to_string()))
+                }
+            }
         }
         Ok(x) => {
             log::debug!(
@@ -91,6 +121,15 @@ impl ReplSender for NreplSender {
             Request::NewSession() => {
                 let mut params = HashMap::new();
                 params.insert(Param::from("op"), Param::from("clone"));
+                params
+            }
+            Request::DisableNsMaps() => {
+                let mut params = HashMap::new();
+                params.insert(Param::from("op"), Param::from("eval"));
+                params.insert(
+                    Param::from("code"),
+                    Param::from("(set! *print-namespace-maps* false)"),
+                );
                 params
             }
             Request::Eval(mut params) => {
@@ -196,10 +235,11 @@ impl TryFrom<bc::Value> for Response {
                         hm.get(&bc::Value::Str("nrepl.middleware.caught/throwable".into()))
                     {
                         log::debug!("nREPL throwable: {}", s);
-                        return Ok(Response::Exception(s.to_string()));
+                        let (trace, _) = parse_exception(&s.replace("#error ", ""));
+                        return Ok(Response::Exception(trace, "".to_string()));
                     } else {
                         log::debug!("nREPL ex: {}", s);
-                        return Ok(Response::Exception(s.to_string()));
+                        return Ok(Response::Exception(s.to_string(), "".to_string()));
                     }
                 }
                 if let Some(bc::Value::List(list)) = hm.get(&bc::Value::Str("status".into())) {

@@ -23,59 +23,6 @@ impl PreplSender {
     }
 }
 
-impl PreplReceiver {
-    fn parse_exception(&self, edn_s: &str) -> String {
-        log::debug!("Parsing exception from pREPL response");
-
-        let mut result = "".to_string();
-        let mut parser = Parser::new(&edn_s);
-        let edn_val = parser.read().unwrap();
-
-        if let Ok(edn::Value::Map(map)) = edn_val {
-            if let edn::Value::Vector(vec) =
-                map.get(&edn::Value::Keyword("via".to_string())).unwrap()
-            {
-                for val in vec.iter() {
-                    if let edn::Value::Map(m) = val {
-                        if let Some(edn::Value::String(s)) =
-                            m.get(&edn::Value::Keyword("message".to_string()))
-                        {
-                            result.push_str(s);
-                            result.push('\n');
-                        }
-                    }
-                }
-            }
-            result.push_str("\n-- Trace --\n");
-            if let edn::Value::Vector(vec) =
-                map.get(&edn::Value::Keyword("trace".to_string())).unwrap()
-            {
-                for val in vec.iter() {
-                    if let edn::Value::Vector(v) = val {
-                        for val in v.iter() {
-                            if let edn::Value::Symbol(sym) = val {
-                                result.push_str(sym);
-                                result.push(' ');
-                            } else if let edn::Value::String(s) = val {
-                                result.push_str(s);
-                                result.push(' ');
-                            } else if let edn::Value::Integer(i) = val {
-                                result.push_str(&i.to_string());
-                                result.push(' ');
-                            }
-                        }
-
-                        result = result.trim().to_string();
-                        result.push('\n');
-                    }
-                }
-            }
-        }
-
-        result
-    }
-}
-
 pub struct PreplReceiver {
     #[allow(dead_code)]
     host: String,
@@ -190,7 +137,8 @@ impl ReplReceiver for PreplReceiver {
                             };
                             if exception {
                                 log::debug!("EXCEPTION: {}", &val);
-                                Ok(Response::Exception(self.parse_exception(&val)))
+                                let (trace, err) = parse_exception(&val);
+                                Ok(Response::Exception(trace, err))
                             } else {
                                 Ok(Response::Value(val, ns, ms as usize, form))
                             }

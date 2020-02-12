@@ -9,7 +9,6 @@ const DATEFMT: &str = "%H:%M:%S %b %d %Y";
 pub struct LogBuf {
     buf: Buffer,
     bufno: i64,
-    winid: i64,
     max_lines: i64,
 }
 
@@ -25,10 +24,6 @@ impl LogBuf {
             Some(buf) => Ok(LogBuf {
                 bufno: buf.get_number(nvim)?,
                 buf,
-                winid: nvim
-                    .get_var("logbuf_winid")?
-                    .as_i64()
-                    .ok_or("Unable to get 'g:logbuf_winid' variable from NVIM")?,
                 max_lines,
             }),
             None => Err(MyError::from("Logbuf not opened in NVIM")),
@@ -74,14 +69,30 @@ impl LogBuf {
         append
     }
 
-    fn cursor_setter(&mut self, cursor_line: i64) -> Vec<neovim_lib::Value> {
-        let mut cursor: Vec<neovim_lib::Value> = vec!["nvim_win_set_cursor".into()];
-        let mut args: Vec<neovim_lib::Value> = vec![self.winid.into()];
-        let tuple: Vec<neovim_lib::Value> = vec![cursor_line.into(), 0i64.into()];
-        args.push(tuple.into());
-        cursor.push(args.into());
+    fn cursor_setter(
+        &mut self,
+        nvim: &mut Neovim,
+        cursor_line: i64,
+    ) -> Option<Vec<neovim_lib::Value>> {
+        // ?.as_i64().ok_or("Unable to get 'g:logbuf_winid' variable from NVIM")?,
+        match nvim.get_var("logbuf_winid") {
+            Ok(id) => match id.as_i64() {
+                Some(i) => {
+                    let mut cursor: Vec<neovim_lib::Value> = vec!["nvim_win_set_cursor".into()];
+                    let mut args: Vec<neovim_lib::Value> = vec![i.into()];
+                    let tuple: Vec<neovim_lib::Value> = vec![cursor_line.into(), 0i64.into()];
+                    args.push(tuple.into());
+                    cursor.push(args.into());
 
-        cursor
+                    Some(cursor)
+                }
+                None => None,
+            },
+            Err(_) => {
+                log::debug!("Unable to get 'g:logbuf_winid' variable from NVIM");
+                None
+            }
+        }
     }
 
     pub fn append_lines(&mut self, nvim: &mut Neovim, lines: Vec<String>) -> Result<()> {
@@ -102,7 +113,9 @@ impl LogBuf {
             }
 
             atom.push(self.appender(lines).into());
-            atom.push(self.cursor_setter(cursor_line).into());
+            if let Some(cursor) = self.cursor_setter(nvim, cursor_line) {
+                atom.push(cursor.into());
+            }
             nvim.call_atomic(atom)?;
         }
 

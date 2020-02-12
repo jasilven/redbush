@@ -40,7 +40,7 @@ fn setup_logger() -> Result<()> {
         })
         .level(log::LevelFilter::Debug)
         .level_for("neovim_lib", log::LevelFilter::Error)
-        .level_for("redbush::repl::bencode", log::LevelFilter::Error)
+        .level_for("redbush::nrepl::bencode", log::LevelFilter::Error)
         .chain(fern::DateBased::new("/tmp/redbush.log.", "%Y-%m-%d"))
         .apply()?;
 
@@ -188,9 +188,18 @@ fn repl_loop(mut receiver: impl ReplReceiver, logbuf: &mut logbuf::LogBuf) -> Re
                 log::debug!("Got OUT response from REPL: {}", s);
                 logbuf.show(&mut nvim, prefix.get("out").unwrap_or(&"".to_string()), &s)?;
             }
-            Ok(repl::Response::Exception(s)) => {
-                log::debug!("Got EXCEPTION response from REPL: {}", s);
-                logbuf.show(&mut nvim, prefix.get("exc").unwrap_or(&"".to_string()), &s)?;
+            Ok(repl::Response::Exception(trace, err)) => {
+                log::debug!("Got EXCEPTION response from REPL: {} {}", trace, err);
+                logbuf.show(
+                    &mut nvim,
+                    prefix.get("err").unwrap_or(&"".to_string()),
+                    &err,
+                )?;
+                logbuf.show(
+                    &mut nvim,
+                    prefix.get("exc").unwrap_or(&"".to_string()),
+                    &trace,
+                )?;
             }
             Ok(repl::Response::Other(s)) => {
                 log::debug!("Got OTHER response from REPL: {}", s);
@@ -204,11 +213,14 @@ fn repl_loop(mut receiver: impl ReplReceiver, logbuf: &mut logbuf::LogBuf) -> Re
                 let mut status = "".to_string();
                 v.iter().for_each(|s| status.push_str(&format!("{} ", s)));
 
-                logbuf.show(
-                    &mut nvim,
-                    prefix.get("status").unwrap_or(&"".to_string()),
-                    &status,
-                )?;
+                // 'status' can be shown for nrepl but not for prepl.
+                // For now this is commented out so that the behaviour is the same for both repls.
+                //
+                // logbuf.show(
+                //     &mut nvim,
+                //     prefix.get("status").unwrap_or(&"".to_string()),
+                //     &status,
+                // )?;
 
                 if v.contains(&"session-closed".to_string()) {
                     break;
