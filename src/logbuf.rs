@@ -30,16 +30,18 @@ impl LogBuf {
         }
     }
 
-    pub fn message(&self, nvim: &mut Neovim, msg: &str) -> Result<()> {
+    pub fn message(&mut self, nvim: &mut Neovim, msg: &str) -> Result<()> {
         log::debug!("Showing logbuf welcome");
         let lines = vec![format!(";; [{}] {}", Local::now().format(DATEFMT), msg)];
-        let start = if self.buf.line_count(nvim)? > 1 {
-            -1
+        if self.buf.line_count(nvim)? > 1 {
+            self.append_lines(nvim, lines)?;
+        // -1
         } else {
-            0
+            self.buf.set_lines(nvim, 0, -1, true, lines)?;
+            // 0
         };
 
-        self.buf.set_lines(nvim, start, -1, true, lines)?;
+        // self.buf.set_lines(nvim, start, -1, true, lines)?;
         Ok(())
     }
 
@@ -74,7 +76,6 @@ impl LogBuf {
         nvim: &mut Neovim,
         cursor_line: i64,
     ) -> Option<Vec<neovim_lib::Value>> {
-        // ?.as_i64().ok_or("Unable to get 'g:logbuf_winid' variable from NVIM")?,
         match nvim.get_var("logbuf_winid") {
             Ok(id) => match id.as_i64() {
                 Some(i) => {

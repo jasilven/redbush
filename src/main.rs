@@ -229,13 +229,13 @@ fn repl_loop(mut receiver: impl ReplReceiver, logbuf: &mut logbuf::LogBuf) -> Re
             Ok(repl::Response::Eof()) => {
                 log::debug!("Got EOF response from REPL");
                 nvim.command("RedBushStop")?;
-                logbuf.message(&mut nvim, "REPL died?")?;
+                logbuf.message(&mut nvim, "End")?;
                 panic!("Got EOF from REPL");
             }
             Err(e) => {
                 log::debug!("Got Error from REPL: {}", &e);
                 nvim.command("RedBushStop")?;
-                logbuf.message(&mut nvim, "REPL died?")?;
+                logbuf.message(&mut nvim, "Exit")?;
                 panic!(format!("Failed to get REPL message (REPL died?): {}", e));
             }
         }
@@ -289,7 +289,7 @@ fn run(
         }
     }
 
-    log::debug!("Waiting for nREPL thread");
+    log::debug!("Waiting for REPL thread");
 
     match nrepl_t.join() {
         Err(e) => Err(MyError::from(format!("Error from nREPL thread: {:?}", e))),
