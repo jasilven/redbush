@@ -13,3 +13,4 @@ neovim-lib = "0.6.0"
 clap = "2.33.0"
 chrono = "0.4"
 edn = "0.3.0"
+bencode_rs = { git = "https://github.com/jasilven/bencode_rs", tag = "v0.1.0" }

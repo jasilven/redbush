@@ -1,13 +1,11 @@
 use crate::repl::{
     parse_exception, Param, ReplError, ReplReceiver, ReplSender, Request, Response, Result,
 };
-// use crate::repl::*;
+use bencode_rs as bc;
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::io::{BufReader, BufWriter, Write};
 use std::net::TcpStream;
-mod bencode;
-use bencode as bc;
 
 pub struct NreplSender {
     #[allow(dead_code)]
@@ -115,6 +113,22 @@ pub fn new_sender_receiver(host: &str, port: &str) -> Result<(impl ReplSender, i
     }
 }
 
+fn build_bc_value(hm: HashMap<Param, Param>) -> bc::Value {
+    let mut bcmap = HashMap::<bc::Value, bc::Value>::new();
+    for (k, v) in hm.iter() {
+        let key = match k {
+            Param::Str(s) => bc::Value::Str(s.to_string()),
+            Param::Int(i) => bc::Value::Int(*i),
+        };
+        let val = match v {
+            Param::Str(s) => bc::Value::Str(s.to_string()),
+            Param::Int(i) => bc::Value::Int(*i),
+        };
+        bcmap.insert(key, val);
+    }
+    bc::Value::from(bcmap)
+}
+
 impl ReplSender for NreplSender {
     fn send(&mut self, req: Request) -> Result<()> {
         let mut params = match req {
@@ -163,7 +177,7 @@ impl ReplSender for NreplSender {
 
         log::debug!("Sending request to NREPL: {:?}", &params);
 
-        self.write_and_flush(bc::Value::from(params).to_bencode().as_bytes())?;
+        self.write_and_flush(build_bc_value(params).to_bencode().as_bytes())?;
         self.request_cnt += 1;
 
         Ok(())
@@ -191,24 +205,6 @@ impl ReplReceiver for NreplReceiver {
                 _ => Err(ReplError::Error(format!("BencodeError: {}", e))),
             },
         }
-    }
-}
-
-impl From<HashMap<Param, Param>> for bc::Value {
-    fn from(hm: HashMap<Param, Param>) -> bc::Value {
-        let mut bcmap = HashMap::<bc::Value, bc::Value>::new();
-        for (k, v) in hm.iter() {
-            let key = match k {
-                Param::Str(s) => bc::Value::Str(s.to_string()),
-                Param::Int(i) => bc::Value::Int(*i),
-            };
-            let val = match v {
-                Param::Str(s) => bc::Value::Str(s.to_string()),
-                Param::Int(i) => bc::Value::Int(*i),
-            };
-            bcmap.insert(key, val);
-        }
-        bc::Value::from(bcmap)
     }
 }
 
